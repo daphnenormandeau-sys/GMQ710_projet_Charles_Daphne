@@ -36,6 +36,8 @@ Préalablement à ces étapes, des images satellites de MODIS d'un feu de forêt
 - Charles Raymond : Recherche de données, généralisation et révision du code, peaufinage des graphiques et de la présentation
 
 ## Questions à résoudre
-- Certaines images de température LST ont plusieurs pixels manquants pour la zone du feu de Lebel-sur-Quévillon. Devrais-t-on quand même utiliser ces données?
+- Certaines images de température LST ont plusieurs pixels manquants pour la zone du feu de Lebel-sur-Quévillon. Devrais-t-on quand même utiliser ces données? Si oui, devrait-on garder uniquement les images avec un seuil de pixels existants pour calculer une moyenne indicative ?
+- Il y a un décalage géographique entre la couche shapefile d'enveloppe et les rasters téléchargés (projection MODIS sinusoidale), pourquoi?
+- Est-ce qu'il est OK de de reprojeter la couche de points suivant l'évolution du feu après leur détermination ? En d'autres mots, pouvons-nous faire les traitements avant d'effectuer la reprojection ?
   
 
