@@ -370,3 +370,4 @@ plot_save_fig(mean_df)
 #    create_point_layer(burnt_zones, metadata, dates_list_for_search[i + 1])
 
 
+bij
