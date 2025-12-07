@@ -15,9 +15,28 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import geopandas as gpd
 import rasterio
-from shapely.geometry import Point
+from shapely.geometry import Point, LineString, MultiPoint, Polygon
+from shapely import convex_hull, buffer, intersects, union
 from matplotlib import cycler
+from scipy.ndimage import label
 
+############################################################################
+# Variables globales du code (pouvant être modifiées)
+############################################################################
+
+#Chemin du dossier avec les images MODIS, réso. spatiale de 500 m (bandes b01 = R, b02 = NIR et b07 = SWIR)
+# Les images proviennent du jeu de données Google Eart Engine "MODIS/006/MOD09GA"
+refl_images_folder = 'Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+
+# Chemin du dossier avec les images  MODIS, réso. spatiale de 1 km (bande de LST)
+# Les images proviennent du jeu de données Google Eart Engine "MODIS/061/MOD21A1D"
+lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+
+# Date de la première image (début de la période d'analyse)
+start_date = '2023-05-27'
+
+# Date d'émission du rapport (fin de la période d'analyse)
+date_of_report = '2023-06-03' # (À MODIFIER AU BESOIN)
 
 ############################################################################
 # Définitions de fonctions utiles à l'analyse
@@ -103,6 +122,13 @@ def extract_data_stats(data_array):
     
     for date_data_array in data_array:
         
+        nb_nan_pixels = np.count_nonzero(np.isnan(date_data_array)) # Nombre de pixels avec NaN
+        total_pixels = date_data_array.size # Nombre total de pixels
+        
+        if nb_nan_pixels == total_pixels: # Si tous les pixels sont des NaN,
+            mean_list.append(np.nan), std_list.append(np.nan), median_list.append(np.nan)
+            continue # on ajoute des NaN aux listes de statistiques et on passe à la date suivante
+        
         # Calcul de la moyenne, de l'écart-type et de la médiane en ignorant les pixels avec NaN
         mean, std, median = np.nanmean(date_data_array), np.nanstd(date_data_array), np.nanmedian(date_data_array)
         
@@ -112,11 +138,36 @@ def extract_data_stats(data_array):
     return  mean_list, std_list, median_list # Retourne les listes de statistiques
 
 
+# Fonction qui permet de trouver les journées avec plus de (treshold) % de pixels avec LST valide et qui corrige la
+# grille de statistique
+def correct_LST_stat_values(LST_list, LST_stat_values, treshold):
+    
+    good_LST_days_indexes = [] # Initialisation de la liste des indexes des journées avec bonne LST
+    
+    # Boucle sur les journées (nombre de grilles de LST)
+    for i in range(len(LST_list)):
+        total_pixels = LST_list[i].size # Nombre total de pixels
+        non_valid_pixels = np.count_nonzero(np.isnan(LST_list[i])) # Nombre de pixels valides (non-NaN)
+        valid_pixels = total_pixels - non_valid_pixels # Nombre de pixels valides
+        valid_percentage = (valid_pixels / total_pixels) * 100 # Pourcentage de pixels valides
+        
+        if valid_percentage >= treshold: # Si le pourcentage de pixels valides est supérieur au seuil
+            good_LST_days_indexes.append(i) # On ajoute l'index de la journée à la liste
+    
+    corrected_LST_stat_values = LST_stat_values.copy() # Copie de la liste des valeurs de LST pour correction
+    
+    for i in range(len(LST_stat_values)):
+        if i not in good_LST_days_indexes: # Si l'index de la journée n'est pas dans la liste des journées avec bonne LST
+            corrected_LST_stat_values[i] = np.nan # On remplace la valeur de la statistique par NaN
+            
+    return corrected_LST_stat_values # On retourne la liste des statistiques corrigées
+
+
 # Fonction permettant de mettre des statistiques de données (et leur date correspondante) dans un Dataframe 
-def generate_stats_dataframe(stat_name, stat_NDVI, stat_NBR, dates_list):
+def generate_stats_dataframe(stat_name, stat_NDVI, stat_NBR, stat_LST, dates_list):
     
     # Création d'un dictionnaire pour stocker les données
-    data = {'Date' : dates_list, f'NDVI_{stat_name}' : stat_NDVI, f'NBR_{stat_name}' : stat_NBR}
+    data = {'Date' : dates_list, f'NDVI_{stat_name}' : stat_NDVI, f'NBR_{stat_name}' : stat_NBR, f'LST_{stat_name}' : stat_LST}
     
     # Création du DataFrame pandas à partir du dictionnaire
     stats_df = pd.DataFrame(data)
@@ -161,11 +212,11 @@ def plot_save_fig(df):
         # Fermeture de la modification du graphique
         plt.close()
     
-    # Produire et sauvegarder le graphique contenant toutes les données
-    
+    # Produire et sauvegarder le graphique contenant toutes les données des indices spectraux
     plt.rcParams['axes.prop_cycle'] = cycler(color=['green', 'red']) # Choix des couleurs à appliquer aux courbes (vert pour NDVI, rouge pour NBR)
+    df_to_plot = df.drop(columns=['LST_Mean']) # On enlève la LST pour ce graphique
     
-    plt.plot(x_ticks_locations, df, linestyle='--', marker='o', markersize=3) # Écriture du graphique
+    plt.plot(x_ticks_locations, df_to_plot, linestyle='--', marker='o', markersize=3) # Écriture du graphique
     plt.xticks(x_ticks_locations_display, x_ticks_labels_display, rotation=45, fontsize=8) # Affichage des ticks et labels de l'axe des x
     plt.xlabel('Date of MODIS observation')      # Mettre titre de l'axe des abscisse
     plt.ylabel('Mean Value')
@@ -174,22 +225,15 @@ def plot_save_fig(df):
     plt.savefig('All_indices.png')
 
 
-#TODO fonction pour trouver le pixel central/trouver l'origine du feu et à quel image
-#commencer par gros cadran et raffiner
-#point origine feu et point avec la plus grande diff : flèche direction
-
-# Fonction permettant d'identifier les zones brûlées dans la grille de pixels selon une fenêtre d'analyse et un seuil spécifique
-def find_burnt_zone(dNBR_grid, window_size, threshold):
+# Fonction permettant d'identifier les zones entourées d'une fenêtre d'analyse dont les valeurs sont  soient entièrement
+# au-dessus d'un seuil spécifique oiu partiellement (géré par l'input condition)
+def find_windows_above_threshold(pixel_grid, window_size, threshold, condition):
     
-    pixels_around_center = int((window_size-1)/2) # Nombre de pixels devant être de part et d'autre du pixel central (carré de côté 'pixels_around_around_center' autour du pixel central)
-    row_indexes_central = list(range(pixels_around_center, len(dNBR_grid) - pixels_around_center, 1)) # Indices correspondant aux lignes de pixels centraux
-    pixel_indexes_central = list(range(pixels_around_center, len(dNBR_grid[0]) - pixels_around_center, 1)) # Indices (dans les lignes) correspondant aux pixels centraux
+    pixels_around_center = int((window_size-1)/2) # Nombre de pixels devant être de part et d'autre du pixel central 
+    row_indexes_central = list(range(pixels_around_center, len(pixel_grid) - pixels_around_center, 1)) # Indices correspondant aux lignes de pixels centraux
+    pixel_indexes_central = list(range(pixels_around_center, len(pixel_grid[0]) - pixels_around_center, 1)) # Indices (dans les lignes) correspondant aux pixels centraux
     
-    burnt_zones = np.full_like(dNBR_grid, 0, dtype=float) # Initialisation de la liste qui contiendra les dNBR des zones brûlées
-                            
-    
-    max_dNBR = 0 # Initialisation du maximum du dNBR
-    index_max_dNBR = [0 , 0] # Initialisation de la position du pixel central du maximum du dNBR
+    identified_zones = np.full_like(pixel_grid, 0, dtype=float) # Initialisation de la liste qui contiendra les pixels centraux des zones identifiées
     
     # Boucle agissant sur chacun des pixels centraux
     for row_index in row_indexes_central:
@@ -203,30 +247,31 @@ def find_burnt_zone(dNBR_grid, window_size, threshold):
             window_values_list = [] # Initialisation de la liste
             for window_row_index in window_row_indexes:
                 for window_pixel_index in window_pixel_indexes:
-                    if not m.isnan(dNBR_grid[window_row_index][window_pixel_index]): #si le pixel est non-nul,
-                        window_values_list.append(dNBR_grid[window_row_index][window_pixel_index]) # On ajoute à la liste
+                    window_values_list.append(dNBR_grid[window_row_index][window_pixel_index]) # On ajoute à la liste
             
-            # Si la fenêtre d'analyse a des valeurs non-nulles, on stocke le min et la moyenne du dNBR
-            if window_values_list:
-                window_mean = np.mean(window_values_list) # On trouve la valeur moyenne de la fenêtre
-                window_min = np.min(window_values_list) # On trouve la valeur minimale de la fenêtre
+            # On veut que tous les pixels de la fenêtre soient au-dessus du seuil
+            if condition == 'all_pixels':
+                # Si la liste de valeurs dans la fenêtre d'analyse ne contient pas de NaN, on stocke le min et la moyenne de la fenêtre
+                if np.count_nonzero(np.isnan(window_values_list)) == 0:
+                    window_mean = np.mean(window_values_list) # On trouve la valeur moyenne de la fenêtre
+                    window_min = np.min(window_values_list) # On trouve la valeur minimale de la fenêtre
+                
+                    # Si le min de la fenêtre >= threshold, la zone est identifiée
+                    if window_min >= threshold : 
+                        identified_zones[window_row_index][window_pixel_index] = window_mean # On stocke la moyenne de la zone dans le pixel central
             
-                # Si le dNBR_min de la fenêtre >= threshold, la zone est brûlée
-                if window_min >= threshold : 
-                    burnt_zones[window_row_index][window_pixel_index] = window_mean # si le min dNBR dépasse le seuil,
-                                                                                     # la zone est brûlée et on enregistre la valeur moyenne
-                                                                                     # pour le pixel central
-                    if window_mean > max_dNBR:
-                        max_dNBR = window_mean
-                        index_max_dNBR[0] = row_index
-                        index_max_dNBR[1] = pixel_index
-                    
-    return burnt_zones, [max_dNBR, index_max_dNBR] # on retourne les zones brûlées et le point central de la zone la plus intense du feu   
+            # On veut que au moins un pixel de la fenêtre soit au-dessus du seuil            
+            if condition == 'any_pixel':
+                if any(value >= threshold for value in window_values_list) == True:
+                    window_mean = np.mean(window_values_list) # On trouve la valeur moyenne de la fenêtre
+                    identified_zones[window_row_index][window_pixel_index] = window_mean # On stocke la moyenne de la zone dans le pixel central   
+                       
+    return identified_zones # on retourne les zones identifiées
+    
 
-# Fonction qui crée une grille dans laquelle chaque élément
-# correspond à un pixel et contient les coordonnées du pixel
-# et sa température
-def create_point_layer(burnt_zones, metadata, date):
+# Fonction qui crée des fichiers vectoriels (shapefile) des grilles de zones brûlées
+def create_vector_layers(burnt_zones, metadata, date):
+    
     # # Trouver et mettre dans une liste les coordonnées du point central de chaque pixel
     # Ce seront les coordonnées des points dans la couche vectorielle
     # Initialiser les listes avec la première coordonnée
@@ -247,36 +292,101 @@ def create_point_layer(burnt_zones, metadata, date):
     lat_burnt_list = []
     lon_burnt_list = []
     dNBR_list = []
-    
-    # Création d'une liste des indexes des points centraux des zones brûlées
-    burnt_zones_indexes = np.nonzero(burnt_zones) # indexes des lignes et colonnes des valeurs non nulles
+    label_list = []
 
+    # Création d'une liste des indexes des points centraux des zones brûlées
+    burnt_zones_indexes = np.nonzero(np.nan_to_num(burnt_zones, nan = 0)) # indexes des lignes et colonnes des valeurs non nulles
+
+    # Avant de créer une géométrie de polygone à partir de points, il faut séparer les points selon leur proximité
+    # (dans les cas avec des points regroupés, mais séparés par une ceertaine distance) On aura donc plusieurs polygones
+    #Remplacement des valeurs NAN par 0 de la grille des zones brûlées
+    burnt_zones_with_zeros = np.nan_to_num(burnt_zones, nan=0)
+    labeled_array, num_features = label(burnt_zones_with_zeros) #labeled_array : grille avec les labels associées à chaque 
+                                                                                # groupe de points collés, num_features : nb de groupes de points
      # On regroupe les paires d'indexes
     for row, column in zip(burnt_zones_indexes[0], burnt_zones_indexes[1]):
-        # Pour chaque paires d'indexe, on ajoute l'année de changement et les coordonnées aux listes créées avant la boucle
+        # Pour chaque paires d'indexe, on ajoute la valeur de dNBR et les coordonnées aux listes créées avant la boucle
         dNBR_list.append(burnt_zones[row][column])
         lon_burnt_list.append(lon_grid[row, column])
         lat_burnt_list.append(lat_grid[row, column])
+        label_list.append(labeled_array[row][column])
         
-
     # Créer un dictionnaire 
     dict = {'Lon': lon_burnt_list,
             'Lat': lat_burnt_list,
             'dNBR': dNBR_list,
+            'label' : label_list
              }
         
     # On crée un DataFrame à partir du dictionnaire
     df = pd.DataFrame(dict)
     
     # Création de la géométrie Point à partir des colonnes "Lat" et "Lon"
-    geometry = [Point(lon, lat) for lon, lat in zip(df['Lon'], df['Lat'])]
+    point_geometry = [Point(lon, lat) for lon, lat in zip(df['Lon'], df['Lat'])]
 
-    # Création du GeoDataFrame en spécifiant la géométrie
-    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs = metadata[3])
+    # Création des GeoDataFrame en spécifiant les géométrie
+    point_gdf = gpd.GeoDataFrame(df, geometry=point_geometry, crs = metadata[3])
     
-    # Création d'un shapefile à partir du Dataframe
-    gdf.to_file('burnt_zones_' + date + '.shp')
+    # Boucle pour créer les géométries de polygones
+    #Initialisation d'une liste de polygones
+    polygons_list = []
+    linestring_list = []
+    point_list = []
+    nb_labels = 0 # compteur pour le nombre de polygones
+    for k in range(1, num_features + 1):
+        # Entrées du gdf avec les points du groupe ayant le label == k + 1
+        point_gdf_groups = point_gdf.loc[point_gdf['label'] == k, ['geometry']]
+
+        # Création de la liste des points du polygone
+        polygon_points = [geom for geom in point_gdf_groups['geometry']]
         
+        # Création de la géométrie Polygon convexe à partir de la géométrie de points
+        multi_geom = convex_hull(MultiPoint(polygon_points))
+
+        # On ajoute la géométrie créée à la liste correspondante
+        if isinstance(multi_geom, Point):
+            point_list.append(multi_geom)
+
+        if isinstance(multi_geom, LineString):
+            linestring_list.append(multi_geom)
+
+        if isinstance(multi_geom, Polygon):
+            polygons_list.append(multi_geom)
+            nb_labels = nb_labels + 1
+    
+    # Créer un dictionnaire et un dataframe pour les polygones
+    polygon_dict = {'label' : range(1, nb_labels + 1)} 
+    polygon_df = pd.DataFrame(polygon_dict)
+    
+    # Créer un geoDataframe avec les polygones
+    polygon_gdf = gpd.GeoDataFrame(polygon_df, geometry = polygons_list, crs = metadata[3])
+    
+    # Création des shapefile à partir des dataframe
+    point_gdf.to_file('point_burnt_zones_' + date + '.shp')
+    polygon_gdf.to_file('polygon_burnt_zones_' + date + '.shp')
+    
+    return polygons_list # On retourne la géométrie de polygone
+
+
+# Fonction qui permet de combiner les polygones d'une liste qui intersectent un polygone original selon une resolution donnée
+def polygon_update(original_polygon, polygons_list, buffer_size):
+        
+    # On boucle sur les polygones de la liste
+    for polygon in polygons_list:
+        
+    # Création de buffers autour des polygones candidats et du polygone original 
+        buffered_polygon = buffer(polygon, buffer_size) # Buffer de taille resolution du pixel
+        buffered_original_polygon = buffer(original_polygon, buffer_size)
+        
+    # Si les polygones s'intersectent, un nouveau polygone les combinant est créé
+        if intersects(buffered_polygon, buffered_original_polygon) == True:
+            new_polygon = convex_hull(union(polygon, original_polygon))
+        
+    return new_polygon # On retourne la nouvelle géométrie
+
+
+#TODO complètement changer la fonction ci-bas...       
+''''
 # Fonction qui permet de trouver la direction générale d'un feu 
 # à l'aide de données de température du sol
 def fire_direction(lst_raster_dataset_list):
@@ -285,6 +395,7 @@ def fire_direction(lst_raster_dataset_list):
 
     # Création de listes de différence de température
     # selon les 4 cadrans de base (N,S,E,O)
+'''
 
 
 ############################################################################
@@ -295,16 +406,11 @@ def fire_direction(lst_raster_dataset_list):
 # PARTIE 1: LECTURE ET VÉRIFICATION DES IMAGES SATELLITES
 ############################################################################
 
-# Chemin du dossier avec les images MODIS, réso. spatiale de 500 m (bandes b01 = R, b02 = NIR et b07 = SWIR)
-# Les images proviennent du jeu de données Google Eart Engine "MODIS/006/MOD09GA"
-refl_images_folder = 'Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
-
-# Chemin du dossier avec les images  MODIS, réso. spatiale de 1 km (bande de LST)
-# Les images proviennent du jeu de données Google Eart Engine "MODIS/061/MOD21A1D"
-lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
-
 # Génération d'une liste des dates des images MODIS à analyser
-dates_list = np.arange('2023-05-27', '2023-06-30', dtype='datetime64[D]')
+# On a des images datant du 27 mai au 30 juin 2023
+start_date = np.datetime64(start_date) # Conversion de la première date en format datetime64
+date_of_report = np.datetime64(date_of_report)  # Conversion de l'image de la date finale en format datetime64
+dates_list = np.arange(start_date, date_of_report + np.timedelta64(1, 'D'))
 
 # Changement du format des dates pour correspondre aux noms des fichiers
 dates_list_for_search = [str(x).replace("-","_") for x in dates_list]
@@ -343,7 +449,9 @@ for refl_raster_dataset in refl_raster_dataset_list:
 # Boucle sur chaque dataset de LST pour enregistrer la LST
 for lst_raster_dataset in lst_raster_dataset_list:
     LST = lst_raster_dataset.read(1)  # Lecture de la bande de LST
+    LST = LST - 273.15 # Conversion de la LST de Kelvin à Celsius
     LST_list.append(LST) # Ajout des données de LST à la liste correspondante
+
 
 ############################################################################
 # PARTIE 3: STATISTIQUES D'INDICES SPECTRAUX ET LST DANS LA ZONE D'INTÉRÊT
@@ -352,22 +460,63 @@ for lst_raster_dataset in lst_raster_dataset_list:
 # Extraction des valeurs moyennes des indices spectraux pour chaque date
 NDVI_mean_values, _, _ = extract_data_stats(NDVI_list)
 NBR_mean_values, _, _ = extract_data_stats(NBR_list)
-
-#TODO Il faut trouver les journées pour lesquelles la moyenne est pas représentative...
 LST_mean_values, _, _ = extract_data_stats(LST_list)
 
+# Puisque la LST moyenne n'est pas toujours représentative de la région (LST du produit MODIS non corrigée pour la couverture nuageuse),
+# il faut choisir les journées où la LST moyenne est pertinente (+ de 20% des pixels ont une valeur valide)
+corrected_LST_mean_values = correct_LST_stat_values(LST_list, LST_mean_values, 20)
 
 # Stockage des valeurs moyennes dans un DataFrame pandas
-mean_df = generate_stats_dataframe('Mean', NDVI_mean_values, NBR_mean_values, dates_list)
-print(mean_df.head()) # Affichage des premières lignes du DataFrame des moyennes
+mean_df = generate_stats_dataframe('Mean', NDVI_mean_values, NBR_mean_values, corrected_LST_mean_values, dates_list)
+#print(mean_df.head()) # Affichage des premières lignes du DataFrame des moyennes
 
-# Créer et sauvegarder les graphiques d'évolution temporelle des indices
+# Créer et sauvegarder les graphiques d'évolution temporelle des indices et de la LST
 plot_save_fig(mean_df)
 
-# Calcul et stockage des zones brûlées 
-#for i in range(len(NBR_list) - 1):
-#    burnt_zones, fire_zone = find_burnt_zone(NBR_list[i + 1] - NBR_list[i], 3, 0.1) # on calcule avec le dNBR
-#    create_point_layer(burnt_zones, metadata, dates_list_for_search[i + 1])
+
+############################################################################
+# PARTIE 4: DÉTECTION ET CARTOGRAPHIE DES ZONES BRÛLÉES
+############################################################################
+
+# On cherche à trouver le point d'origine du feu en analysant les grilles de dNBR entre la première date et les dates suivantes
+for i in range(len(NBR_list) - 1):
+    dNBR_grid = NBR_list[0] - NBR_list[i+1] # Calcul de la grille dNBR entre la première date et la date étudiée
+    
+    # Nous considérerons qu'une variation de dNBR supérieure à 0.1 constitue une zone brûlée
+    # Or, puisque nous cherchons un point de départ du feu et que nous souhaitons éviter les fausses détections,
+    # nous chercherons une fenêtre d'analyse assez grande de 10x10 pixels dans laquelle tous les pixels sont brûlés
+    fire_origin_grid = find_windows_above_threshold(dNBR_grid, 10, 0.1, 'all_pixels') # on calcule avec le dNBR, tous les pixels doivent être au-dessus du seuil
+
+    if np.sum(fire_origin_grid) != 0: # Si on a trouvé des zones totalement brûlées d'une taille de 10x10 pixels
+        
+        fire_origin_date = dates_list_for_search[i + 1] # Date du début de feu
+        fire_origin_index = i+1                         # Index du début de feu
+        
+        fire_origin_polygon = create_vector_layers(fire_origin_grid, metadata_refl, fire_origin_date) # On crée les couches vectorielles de l'origine du feu
+        print(f'\nIl semble que le feu de forêt ait débuté le : {fire_origin_date}!') # On affiche la date de l'origine du feu
+        break # On arrête la boucle après avoir trouvé le point d'origine du feu
 
 
-bij
+# Une fois le polygone d'origine du feu trouvé, on cartographie les zones brûlées pour toutes les dates suivantes
+burnt_polygon = fire_origin_polygon # On initialise les zones brûlées avec le polygone d'origine du feu
+
+for i in np.arange(fire_origin_index, len(NBR_list) - 1):
+    dNBR_grid = NBR_list[0] - NBR_list[i+1] # Calcul de la grille dNBR entre la première date et la date étudiée
+    
+    # On veut que le dNBR soit plus grand que 0.1 (pixel brûlé) et touche la zone identifiée comme deja brulee
+    possible_burnt_zones = find_windows_above_threshold(dNBR_grid, 3, 0.1, 'any_pixel') # On calcule avec le dNBR les candidats de zone brulee
+    
+    # On polygonise les zones potentiellement brûlées
+    polygons_list = create_vector_layers(possible_burnt_zones, metadata_refl, dates_list_for_search[i + 1]) # On crée la couche vectorielle des zones candidates
+    
+    # On met à jour le polygone avec les nouvelles zones brûlées adjacentes
+    new_polygon = polygon_update(burnt_polygon, polygons_list, metadata_refl[4][0])
+    
+    burnt_polygon = new_polygon # On met à jour les zones brûlées pour la prochaine itération
+    
+    # Créer un geoDataframe avec les polygones
+    polygon_gdf = gpd.GeoDataFrame(geometry = burnt_polygon, crs = metadata_refl[3])
+    
+    # Création des shapefile à partir des dataframe
+    # TODO Marche pas pour le 3 juin, à revérifier!
+    polygon_gdf.to_file('update_burnt_zones_' + dates_list_for_search[i + 1] + '.shp')
