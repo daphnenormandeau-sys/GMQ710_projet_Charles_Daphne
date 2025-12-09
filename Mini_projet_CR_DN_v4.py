@@ -15,8 +15,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import geopandas as gpd
 import rasterio
-from shapely.geometry import Point, LineString, MultiPoint, Polygon
-from shapely import convex_hull, buffer, intersects, union
+from shapely.geometry import Point, MultiPoint, LineString, Polygon, MultiPolygon
+from shapely import convex_hull, buffer, intersects, union, union_all, centroid, distance, difference
+from shapely.ops import transform
+import pyproj
 from matplotlib import cycler
 from scipy.ndimage import label
 
@@ -36,7 +38,19 @@ lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE D
 start_date = '2023-05-27'
 
 # Date d'émission du rapport (fin de la période d'analyse)
-date_of_report = '2023-06-03' # (À MODIFIER AU BESOIN)
+date_of_report = '2023-06-05' # (À MODIFIER AU BESOIN)
+
+# Valeur minimale de dNBR pour laquelle on considère qu'un pixel est considéré comme étant brûlé
+dNBR_fire_treshold = 0.1
+
+# Taille de la fenêtre d'analyse (nb de pixels) pour laquelle on juge qu'un nouveau feu débute
+new_fire_window_size = 7 
+
+# SCR des images MODIS de réflectance (point de départ si une transofrmation est nécessaire)
+starting_crs = "EPSG:4269" # NAD83
+
+# SCR de prédilection lorsqu'une transformation de coordonnées degrés à métriques est nécessaire 
+final_crs = "EPSG:32198" # NAD83 / Quebec Lambert
 
 ############################################################################
 # Définitions de fonctions utiles à l'analyse
@@ -258,19 +272,19 @@ def find_windows_above_threshold(pixel_grid, window_size, threshold, condition):
                 
                     # Si le min de la fenêtre >= threshold, la zone est identifiée
                     if window_min >= threshold : 
-                        identified_zones[window_row_index][window_pixel_index] = window_mean # On stocke la moyenne de la zone dans le pixel central
+                        identified_zones[window_row_index][window_pixel_index] = window_mean # On stocke la moyenne de la zone dans le pixel central    
             
             # On veut que au moins un pixel de la fenêtre soit au-dessus du seuil            
             if condition == 'any_pixel':
                 if any(value >= threshold for value in window_values_list) == True:
                     window_mean = np.mean(window_values_list) # On trouve la valeur moyenne de la fenêtre
-                    identified_zones[window_row_index][window_pixel_index] = window_mean # On stocke la moyenne de la zone dans le pixel central   
+                    identified_zones[window_row_index][window_pixel_index] = window_mean # On stocke la moyenne de la zone dans le pixel central         
                        
     return identified_zones # on retourne les zones identifiées
     
 
 # Fonction qui crée des fichiers vectoriels (shapefile) des grilles de zones brûlées
-def create_vector_layers(burnt_zones, metadata, date):
+def create_vector_layers(burnt_zones, metadata, date, wanted_output):
     
     # # Trouver et mettre dans une liste les coordonnées du point central de chaque pixel
     # Ce seront les coordonnées des points dans la couche vectorielle
@@ -361,42 +375,100 @@ def create_vector_layers(burnt_zones, metadata, date):
     # Créer un geoDataframe avec les polygones
     polygon_gdf = gpd.GeoDataFrame(polygon_df, geometry = polygons_list, crs = metadata[3])
     
-    # Création des shapefile à partir des dataframe
-    point_gdf.to_file('point_burnt_zones_' + date + '.shp')
-    polygon_gdf.to_file('polygon_burnt_zones_' + date + '.shp')
+    # On écrit les géométries dans des couches shapefile, si désiré
+    if wanted_output != 'only_polygons':
+        # Création des shapefile à partir des dataframe
+        point_gdf.to_file('point_burnt_zones_' + date + '.shp')
+        polygon_gdf.to_file('polygon_burnt_zones_' + date + '.shp')
     
     return polygons_list # On retourne la géométrie de polygone
 
 
 # Fonction qui permet de combiner les polygones d'une liste qui intersectent un polygone original selon une resolution donnée
 def polygon_update(original_polygon, polygons_list, buffer_size):
-        
+    
+    iterated_polygon = original_polygon # Initialisation du polygone qui sera itéré
+    
     # On boucle sur les polygones de la liste
     for polygon in polygons_list:
         
     # Création de buffers autour des polygones candidats et du polygone original 
         buffered_polygon = buffer(polygon, buffer_size) # Buffer de taille resolution du pixel
-        buffered_original_polygon = buffer(original_polygon, buffer_size)
+        buffered_iterated_polygon = buffer(iterated_polygon, buffer_size)
         
     # Si les polygones s'intersectent, un nouveau polygone les combinant est créé
-        if intersects(buffered_polygon, buffered_original_polygon) == True:
-            new_polygon = convex_hull(union(polygon, original_polygon))
+        if intersects(buffered_polygon, buffered_iterated_polygon) == True:
+            #new_polygon = convex_hull(union(polygon, iterated_polygon))
+            new_polygon = union(polygon, iterated_polygon)
+            
+            iterated_polygon = new_polygon # On met à jour le polygone itéré
         
-    return new_polygon # On retourne la nouvelle géométrie
+        
+    return iterated_polygon # On retourne la nouvelle géométrie
 
 
-#TODO complètement changer la fonction ci-bas...       
-''''
-# Fonction qui permet de trouver la direction générale d'un feu 
-# à l'aide de données de température du sol
-def fire_direction(lst_raster_dataset_list):
-    # Déterminer la différence de température entre la dernière et l'avant-dernière journée
-    diff_temp_raster = lst_raster_dataset_list[-1] - lst_raster_dataset_list[-2]
+# Fonction permettant de reprojeter une liste de géométries SHAPELY dans un autre sytème de coordonnées 
+def change_of_crs(list_of_geometries, original_crs, goal_crs):
+    
+    # Définitoin des systèmes en objets pyproj
+    original_crs = pyproj.CRS(original_crs)
+    goal_crs = pyproj.CRS(goal_crs)
+    
+    transformer = pyproj.Transformer.from_crs(original_crs, goal_crs, always_xy = True).transform
+    
+    # Initialisation de la liste qui acceuillera les points transformés
+    tranformed_list_of_geometries = []
+    
+    # Boucle pour transformer les points et les ajouter à la liste
+    for geometry in list_of_geometries:
+        
+        if geometry == None:
+            transformed_geometry = None
+            tranformed_list_of_geometries.append(transformed_geometry)
+            
+            continue # Si il n'y a pas de géométrie, on passe à la prochaine itération
+        
+        transformed_geometry = transform(transformer, geometry)
+        tranformed_list_of_geometries.append(transformed_geometry)
+        
+    return tranformed_list_of_geometries # On retourne
 
-    # Création de listes de différence de température
-    # selon les 4 cadrans de base (N,S,E,O)
-'''
+  
+# Fonction qui permet de trouver les centroides d'une liste de polygones, le centroide des differences et les distances entre chacuns
+def find_difference_centroids_and_distances(polygons_list):
+    
+    # Initialisation de la list qui contiendra les centroides pour chaque date
+    polygons_centroid = []
+    
+    # Boucle pour remplir la liste des centroides de chaque date
+    for polygons in polygons_list:
+        current_centroid = centroid(polygons)
+        polygons_centroid.append(current_centroid)
+    
+    # Initialisation des listes de differences de polygones, des centroides de ces differences et de distances
+    polygons_difference = [None] # Initialisation des differences de polygones
+    polygons_difference_centroid = [None] # Initialisation de la liste des centroides
+    centroid_distances = [np.nan] # Initialisation de la liste des distances
+    
+    # Boucle pour remplir les differentes listes
+    for i in range(len(polygons_list) - 1):
+        
+        # Difference de polygones entre le polygone suivant et le polygone 'i'
+        current_difference = difference(polygons_list[i], polygons_list[i+1])
+        polygons_difference.append(current_difference)
+        
+        # Centroide de la difference des polygones (et donc l'expansion du feu)
+        current_difference_centroid = centroid(current_difference)
+        polygons_difference_centroid.append(current_difference_centroid)
+        
+        # Distance separant le centroide du polygone 'i' et le centroide de la difference de polygone
+        current_distance = distance(polygons_centroid[i], polygons_difference_centroid[i+1])
+        centroid_distances.append(current_distance)
+        
 
+    return polygons_centroid, polygons_difference_centroid,  centroid_distances
+        
+    
 
 ############################################################################
 # EXÉCUTIONS PRINCIPALES DU SCRIPT
@@ -478,45 +550,106 @@ plot_save_fig(mean_df)
 # PARTIE 4: DÉTECTION ET CARTOGRAPHIE DES ZONES BRÛLÉES
 ############################################################################
 
+# On initialise une liste qui contiendra les polygones de zones brûlées (il y a déjà une valeur vide car on commence les calculs de dNBR à la seconde date)
+burnt_polygons_list = [None]
+
 # On cherche à trouver le point d'origine du feu en analysant les grilles de dNBR entre la première date et les dates suivantes
 for i in range(len(NBR_list) - 1):
     dNBR_grid = NBR_list[0] - NBR_list[i+1] # Calcul de la grille dNBR entre la première date et la date étudiée
     
     # Nous considérerons qu'une variation de dNBR supérieure à 0.1 constitue une zone brûlée
     # Or, puisque nous cherchons un point de départ du feu et que nous souhaitons éviter les fausses détections,
-    # nous chercherons une fenêtre d'analyse assez grande de 10x10 pixels dans laquelle tous les pixels sont brûlés
-    fire_origin_grid = find_windows_above_threshold(dNBR_grid, 10, 0.1, 'all_pixels') # on calcule avec le dNBR, tous les pixels doivent être au-dessus du seuil
-
-    if np.sum(fire_origin_grid) != 0: # Si on a trouvé des zones totalement brûlées d'une taille de 10x10 pixels
+    # nous chercherons une fenêtre d'analyse assez grande de 7x7 pixels dans laquelle tous les pixels sont brûlés
+    fire_origin_grid = find_windows_above_threshold(dNBR_grid, new_fire_window_size, dNBR_fire_treshold, 'all_pixels') # on calcule avec le dNBR, tous les pixels doivent être au-dessus du seuil
+    
+    if np.sum(fire_origin_grid) != 0: # Si on a trouvé des zones totalement brûlées d'une taille de 7x7 pixels
         
         fire_origin_date = dates_list_for_search[i + 1] # Date du début de feu
         fire_origin_index = i+1                         # Index du début de feu
         
-        fire_origin_polygon = create_vector_layers(fire_origin_grid, metadata_refl, fire_origin_date) # On crée les couches vectorielles de l'origine du feu
+        fire_origin_polygon = create_vector_layers(fire_origin_grid, metadata_refl, fire_origin_date, 'all_layers') # On crée les couches vectorielles de l'origine du feu
         print(f'\nIl semble que le feu de forêt ait débuté le : {fire_origin_date}!') # On affiche la date de l'origine du feu
+        
+        # On ajoute le polygone à la liste de polygones brûlés
+        burnt_polygons_list.append(*fire_origin_polygon)
+        
         break # On arrête la boucle après avoir trouvé le point d'origine du feu
+    
+    else:
+        # Sinon, on ajoute une valeur vide pour la date en cours
+        burnt_polygons_list.append(None)
 
 
-# Une fois le polygone d'origine du feu trouvé, on cartographie les zones brûlées pour toutes les dates suivantes
-burnt_polygon = fire_origin_polygon # On initialise les zones brûlées avec le polygone d'origine du feu
+# Une fois le polygone du tout début du feu trouvé, on cartographie les zones brûlées pour toutes les dates suivantes
 
+burnt_polygons = MultiPolygon(fire_origin_polygon) # On initialise les zones brûlées avec le polygone d'origine du feu
+
+# On fait une boucle sur toutes les dates suivantes
 for i in np.arange(fire_origin_index, len(NBR_list) - 1):
     dNBR_grid = NBR_list[0] - NBR_list[i+1] # Calcul de la grille dNBR entre la première date et la date étudiée
     
+    # On vérifie si des nouveaux polygones pourraient être des nouveaux points d'origine
+    possible_new_fire_origin = find_windows_above_threshold(dNBR_grid, new_fire_window_size, dNBR_fire_treshold, 'all_pixels')
+    
+    # Si on trouve un nouveau point d'origine de feu
+    if np.sum(possible_new_fire_origin) != 0:
+        # On crée ces nouveaux polygones de début de feu
+        new_fire_origin_polygons = create_vector_layers(possible_new_fire_origin, metadata_refl, dates_list_for_search[i + 1], 'only_polygons')
+        burnt_polygons = union_all([burnt_polygons, *new_fire_origin_polygons]) # On ajoute ces polygones aux zones brûlées
+    
+    
+    # Par la suite, on étudie des plus petites zones étant des continuations de feux..
     # On veut que le dNBR soit plus grand que 0.1 (pixel brûlé) et touche la zone identifiée comme deja brulee
-    possible_burnt_zones = find_windows_above_threshold(dNBR_grid, 3, 0.1, 'any_pixel') # On calcule avec le dNBR les candidats de zone brulee
+    possible_burnt_zones = find_windows_above_threshold(dNBR_grid, 3, dNBR_fire_treshold, 'all_pixels') # On calcule avec le dNBR les candidats de zone brulee
     
     # On polygonise les zones potentiellement brûlées
-    polygons_list = create_vector_layers(possible_burnt_zones, metadata_refl, dates_list_for_search[i + 1]) # On crée la couche vectorielle des zones candidates
+    possible_polygons_list = create_vector_layers(possible_burnt_zones, metadata_refl, dates_list_for_search[i + 1], 'only_polygons') # On crée la couche vectorielle des zones candidates
     
-    # On met à jour le polygone avec les nouvelles zones brûlées adjacentes
-    new_polygon = polygon_update(burnt_polygon, polygons_list, metadata_refl[4][0])
+    updated_polygon_list = [] # On initie une liste vide qui accueillera des nouveaux polygones mis à jour
     
-    burnt_polygon = new_polygon # On met à jour les zones brûlées pour la prochaine itération
+    # On fait une boucle sur les polygones considérés comme étant déjà brûlés
+    for burnt_polygon in burnt_polygons.geoms:
+        # On met à jour les polygones déjà brûlés avec les nouvelles zones brûlées adjacentes
+        updated_polygon = polygon_update(burnt_polygon, possible_polygons_list, metadata_refl[4][0])
+        updated_polygon_list.append(updated_polygon)
     
+    # On unifie les polygones qui étaient déjà brûlés avec les nouveaux
+    burnt_polygons = union_all([burnt_polygons, *updated_polygon_list])
+        
     # Créer un geoDataframe avec les polygones
-    polygon_gdf = gpd.GeoDataFrame(geometry = burnt_polygon, crs = metadata_refl[3])
+    polygon_gdf = gpd.GeoDataFrame(geometry = [burnt_polygons], crs = metadata_refl[3])
     
     # Création des shapefile à partir des dataframe
-    # TODO Marche pas pour le 3 juin, à revérifier!
-    polygon_gdf.to_file('update_burnt_zones_' + dates_list_for_search[i + 1] + '.shp')
+    polygon_gdf.to_file('updated_burnt_zones_' + dates_list_for_search[i + 1] + '.shp')
+    
+    # On ajoute les polygones finaux à la liste temporel de géométries
+    burnt_polygons_list.append(burnt_polygons)
+    
+
+############################################################################
+# PARTIE 5: CALCULS ET ANALYSES SUR LES ZONES BRÛLÉES
+############################################################################ 
+    
+# On a calculé la nouvelle zone brûlée pour toutes les dates
+# Nous allons maintenant calculer la direction de déplacement du feu et sa vitesse
+# (en comparant deux itérations subséquentes)
+
+# On transforme les points dans une projection métrique adaptée à la zone d'intérêt
+transformed_burnt_polygons_list = change_of_crs(burnt_polygons_list, starting_crs, final_crs)
+
+# Calcul des centroides des polygones brulés pour chaque date
+burnt_polygons_centroid, burnt_polygons_difference_centroid, centroid_distances = find_difference_centroids_and_distances(transformed_burnt_polygons_list)
+
+print(burnt_polygons_centroid)
+print(centroid_distances)
+
+# Calcul de la vitesse générale du feu 
+fire_general_speed = np.array(centroid_distances)/86400 # Parce que 86400 secondes en 1 journée
+
+print(fire_general_speed*3600/1000) # Affichage en km/h
+
+# Créer un geoDataframe avec les polygones
+point_gdf = gpd.GeoDataFrame(geometry = burnt_polygons_centroid, crs = final_crs)
+    
+# Création des shapefile à partir des dataframe
+point_gdf.to_file('burnt_zones_centroids.shp')
