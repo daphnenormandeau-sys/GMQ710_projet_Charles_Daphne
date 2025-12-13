@@ -12,9 +12,11 @@ import sys
 import numpy as np
 import math as m
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import pandas as pd
 import geopandas as gpd
 import rasterio
+from rasterio.transform import from_bounds
 from shapely.geometry import Point, MultiPoint, LineString, Polygon, MultiPolygon
 from shapely import convex_hull, buffer, intersects, union, union_all, centroid, distance, difference
 from shapely.ops import transform
@@ -30,7 +32,8 @@ from docx.shared import Mm
 import cartopy.crs as ccrs
 import shapely.wkt
 from shapely import ops
-from matplotlib_map_utils import north_arrow
+import contextily as cx
+#from matplotlib_map_utils import north_arrow
 
 ############################################################################
 # Variables globales du code (certaines pouvant être modifiées)
@@ -48,6 +51,9 @@ lst_images_folder = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/
 # de QC (géométrie de points, provenant du site de Données Québec) et celles contenant le 
 # réseau routier de la province (géométrie de lignes, provenant du site de Données Ouvertes Canada)
 analysis_layers_directory = 'Couches/Downloaded_layers/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+
+#Chemin pour le template du rapport word
+word_template_directory = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/GMQ710_projet_Charles_Daphne/'
 
 # Date de la première image (début de la période d'analyse)
 start_date = '2023-05-27'
@@ -514,9 +520,7 @@ def generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, star
     # on utilise Matplotlib et cartopy
     ax = plt.axes(projection=ccrs.epsg(final_crs[-5:]))
     # on place une image en fond
-    ax.stock_img() #TODO
-    # on ajoute les lignes de côtes
-    ax.coastlines() #TODO
+    cx.add_basemap(ax, crs=ccrs.epsg(final_crs[-5:]), source=cx.providers.OpenStreetMap.Mapnik, zoom = 1)
     # on ajoute une grille
     ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
     # on ajoute la grille de la région du feu
@@ -530,23 +534,27 @@ def generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, star
                     ax.fill(xs, ys, alpha=0.5, fc='orange', ec='none') # Fill the polygon
             elif poly.geom_type == 'Polygon': # si c'est un polygone
                 xs, ys = poly.exterior.xy
-                ax.fill(xs, ys, alpha=0.5, fc='orange', ec='none')
+                plot = ax.fill(xs, ys, alpha=0.5, fc='orange', ec='none')
 
-    # réglage des axes                               
+    # réglage des axes et de la légende
+    p1 = mpatches.Rectangle((0, 0), 1, 1, color = 'orange',alpha=0.5)
+    ax.legend(handles = [p1], labels =['Zones brûlée'], loc='upper right')                       
     ax.set_xlim(left=poly_bounds.bounds[0]-2, right=poly_bounds.bounds[2]+2)
     ax.set_ylim(bottom=poly_bounds.bounds[1]-2, top=poly_bounds.bounds[3]+2)
     # titre de la carte et informations
     ax.set_title("Zones brûlées en date du " + date_of_report)
     # Informations générales
-    #ax.text(0.5, -0.2,
-    #    "Système de coordonnées : NAD83/Québec Lambert EPSG : 32198\n" \
-    #    "Source des données : MODIS\n" \
-    #    "Auteurs : Charles Raymond et Daphné Normandeau",
-    #    horizontalalignment='center',
-    #    verticalalignment='top',
-    #    transform=ax.transAxes,
-    #    fontsize=10,
-    #    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)) # Optional text box
+    ax.text(0.5, -0.2,
+        "Système de coordonnées : NAD83/Québec Lambert EPSG : 32198\n" \
+        "Source des données : MODIS\n" \
+        "Auteurs : Charles Raymond et Daphné Normandeau",
+        horizontalalignment='center',
+        verticalalignment='top',
+        transform=ax.transAxes,
+        fontsize=10,
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)) # Optional text box
+    #Agrandir l'étendue de l'image pour que le texte ne soit pas coupé
+    plt.subplots_adjust(bottom=0.3) 
     # flèche du nord
     #north_arrow.north_arrow(ax=ax,
     #                    location="upper right",
@@ -555,6 +563,70 @@ def generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, star
     # on sauvegarde la figure sous la forme d'une image
     plt.savefig(filename)
     plt.close()    
+
+# Fonction permettant de créer une carte GeoTIFF pour les indices spectraux calculés (NDVI et NBR)
+def create_geotiff_map(NDVI, NBR, dNBR, dNDVI, date_of_report, metadata_refl):
+    # On convertit les grilles en type de données float32 pour l'écriture GeoTIFF
+    NDVI = NDVI.astype(np.float32)
+    NBR = NBR.astype(np.float32)
+    dNDVI = dNDVI.astype(np.float32)
+    dNBR = dNBR.astype(np.float32)
+
+    # géoréférencement des images
+    west, south, east, north = metadata_refl[5]
+    width, height = metadata_refl[0], metadata_refl[1]
+    transform = from_bounds(west, south, east, north, width, height)
+    
+    # Définir les métadonnées
+    profile = {
+        'driver': 'GTiff',
+        'dtype': np.float32,
+        'count': 1,  # Nombre de bandes
+        'width': NDVI.shape[1],
+        'height': NDVI.shape[0],
+        'crs': metadata_refl[3], 
+        'transform': transform 
+    }
+
+    # Création et écriture des fichiers Géotiff
+    with rasterio.open('NDVI_' + str(date_of_report) + '.tif', 'w', **profile) as dst:
+        dst.write(NDVI, 1) 
+    with rasterio.open('NBR_' + str(date_of_report) + '.tif', 'w', **profile) as dst:
+        dst.write(NBR, 1) 
+    with rasterio.open('dNDVI_' + str(date_of_report) + '.tif', 'w', **profile) as dst:
+        dst.write(dNDVI, 1) 
+    with rasterio.open('dNBR_' + str(date_of_report) + '.tif', 'w', **profile) as dst:
+        dst.write(dNBR, 1) 
+
+ # Fonction qui génère un rapport docx
+def generate_report(date_of_report,word_template_directory, fire_general_speed_kmh, message):
+        # on lit le modèle avec les balises
+        doc = DocxTemplate(word_template_directory + r'/template_word_proj.docx')
+        # on envoie les infos
+        context = {
+            'date': date_of_report, 'region': 'région', 'dir_fire': 'direction feu',
+            'fire_speed': round(fire_general_speed_kmh[-1],2),
+            'warning_message' : message, 'close_cities' : 'villes_proches', 'superficie' : 'area',
+            'superficie_tot' : 'aire_tot', 'graph_pos' : 'TODO',
+        }
+        # on ajoute l'image des polygones de feux
+        context['fire_image'] = InlineImage(doc, 'feux.png', width=Mm(100))
+        # on ajoute le graphique qui montre l'évolution de la localisation du feu
+        #context['graph_pos'] = InlineImage(doc, graph_pos, width=Mm(100)) #TODO 
+        # on ajoute l'image du NDVI
+        context['NDVI_ajd'] = InlineImage(doc, 'NDVI_' + str(date_of_report) + '.tif', width=Mm(100))  
+        # on ajoute l'image du dNDVI
+        context['dNDVI'] = InlineImage(doc, 'dNDVI_' + str(date_of_report) + '.tif', width=Mm(100)) 
+        # on ajoute l'image du NBR
+        context['NBR_ajd'] = InlineImage(doc, 'NBR_' + str(date_of_report) + '.tif', width=Mm(100)) 
+        # on ajoute l'image du dNBR
+        context['dNBR'] = InlineImage(doc, 'dNBR_' + str(date_of_report) + '.tif', width=Mm(100))  
+        # on ajoute le graphique d'évolutiond des indices
+        context['graph_indices'] = InlineImage(doc,'All_indices.png', width=Mm(100))  
+
+        doc.render(context)
+        # on génère le fichier pour une donnée
+        doc.save('report' + str(date_of_report) + '.docx')
 
 ############################################################################
 # EXÉCUTIONS PRINCIPALES DU SCRIPT
@@ -680,6 +752,7 @@ burnt_polygons = MultiPolygon(fire_origin_polygon)
 # On fait une boucle sur toutes les dates suivant la première apparition d'un feu
 for i in np.arange(fire_origin_index, len(NBR_list) - 1):
     dNBR_grid = NBR_list[0] - NBR_list[i+1] # Calcul de la grille dNBR entre la première date et la date étudiée
+    dNDVI_grid = NDVI_list[i+1] - NDVI_list[0] # Calcul de la grille dNDVI entre la première date et la date étudiée
     
     # On vérifie si des nouveaux polygones pourraient être des nouveaux points d'origine
     possible_new_fire_origin = find_windows_above_threshold(dNBR_grid, new_fire_window_size, dNBR_fire_treshold, 'all_pixels')
@@ -761,56 +834,25 @@ fire_general_speed_kmh = fire_general_speed_ms*3600/1000     # en km/h
 #pos_feux = ? 
 #v_feu = fire_general_speed_kmh 
 #dir_feu = ? direction générale du feu (NSEO)
-#message = ? message d'Avertissement si il y a des villes prochent du feu qui devraient bientôt évacuer
+#TODO arranger le message
+message = "Attention le feu est à moins de x km. Se préparer à évacuer." #message d'Avertissement si il y a des villes prochent du feu qui devraient bientôt évacuer
 #city_in_danger = ? liste des villes proches des feux
 
-
-#TODO Faire de son mieux pour faire un rapport suffisamment beau hahaha
-
-
+# Création des images contenue dans le rapport word
 #générer une image des polygones des zones brûlées géoréférencée
-generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs, 'feux.png', date_of_report)
-print(transformed_burnt_polygons_list)
+generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs, 'feux.png', str(date_of_report))
+# générer les images Geotiff des indices NDVI et NBR
+# Chemin d'une image source pour les métadonnées
+source_image_path = f'{refl_images_folder}MODIS_B1_B2_B7_AOI_{date}.tif' 
+# génération des images du NDVI et NBR
+create_geotiff_map(NDVI, NBR, dNBR_grid, dNDVI_grid, date_of_report, metadata_refl)
+    
+# générer un rapport word de l'état du feu
+generate_report(date_of_report,word_template_directory, fire_general_speed_kmh, message)
 
 
 
 
-# on a besoin de plusieurs infos sur les fichiers dans notre rapport
-""" filename = 
-driver = '?'
-crs = '?'
-bounds = '?'
-# si c'est un shapefile, on doit lire avec fiona
-if '.shp' == filename[-4:]:
-    with fiona.open(file) as src:
-        # on récupère les infos
-        driver = src.driver
-        crs = to_string(src.crs)
-        bounds = str(src.bounds)
-        image = 'image%d.jpg' % index
-        generateImage(image, src.bounds, to_string(src.crs))
-# si c'est un tiff, on doit lire avec rasterio
-elif '.tiff' == filename[-5:]:
-    print('bonjour')
-    with rasterio.open(file) as src:
-        # on récupère les infos
-        driver = src.driver
-        crs = to_string(src.crs)
-        bounds = str(tuple(src.bounds))
-        image = 'image%d.jpg' % index
-        generateImage(image, tuple(src.bounds), to_string(src.crs)) """
 
-""" # on va générer le rapport docx
-if driver != '?':
-    print('hello')
-    # on lit le modèle avec les balises
-    doc = DocxTemplate(workdir + r'/template_word.docx')
-    # on envoie les infos
-    context = {
-        'filename': filename, 'format': driver, 'bounds': bounds, 'crs': crs
-    }
-    # on ajoute l'image
-    context['image'] = InlineImage(doc, image, width=Mm(100))
-    doc.render(context)
-    # on génère le fichier pour une donnée
-    doc.save('generated_doc_%i.docx' % index) """
+
+
