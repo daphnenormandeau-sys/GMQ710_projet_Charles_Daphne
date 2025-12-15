@@ -23,15 +23,10 @@ from shapely.ops import transform
 import pyproj
 from matplotlib import cycler
 from scipy.ndimage import label
-import glob
-import os
-import fiona
-from fiona.crs import to_string
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
 import cartopy.crs as ccrs
 import shapely.wkt
-from shapely import ops
 import contextily as cx
 
 
@@ -41,25 +36,25 @@ import contextily as cx
 
 #Chemin du dossier avec les images MODIS, réso. spatiale de 500 m (bandes b01 = R, b02 = NIR et b07 = SWIR)
 # Les images proviennent du jeu de données Google Eart Engine "MODIS/006/MOD09GA"
-refl_images_folder = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+refl_images_folder = 'Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Chemin du dossier avec les images  MODIS, réso. spatiale de 1 km (bande de LST)
 # Les images proviennent du jeu de données Google Eart Engine "MODIS/061/MOD21A1D"
-lst_images_folder = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Chemin du dossier contenant les couches SHP contenant les lieux habités de la province 
-# de QC (géométrie de points, provenant du site de Données Québec) et celles contenant le 
-# réseau routier de la province (géométrie de lignes, provenant du site de Données Ouvertes Canada)
+# de QC (géométrie de points, provenant du site de Données Québec)
 analysis_layers_directory = 'Couches/Downloaded_layers/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
-
-#Chemin pour le template du rapport word
-word_template_directory = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/GMQ710_projet_Charles_Daphne/'
-
-# Date de la première image (début de la période d'analyse)
-start_date = '2023-05-27'
+shp_layer_crs = "EPSG:4326" #WGS84
 
 # Date d'émission du rapport (fin de la période d'analyse)
 date_of_report = '2023-06-03' # (À MODIFIER AU BESOIN)
+
+#Chemin pour le template du rapport word
+word_template_directory = 'C:/Users/charl/OneDrive/Bureau/Université Sherbrooke/Automne 2025/GMQ710 - Analyse et programmation en géomatique/PYTHONCODES/Mini-projet/'  #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+
+# Date de la première image (début de la période d'analyse)
+start_date = '2023-05-27'
 
 # Valeur minimale de dNBR pour laquelle on considère qu'un pixel est considéré comme étant brûlé
 dNBR_fire_treshold = 0.1
@@ -67,7 +62,10 @@ dNBR_fire_treshold = 0.1
 # Taille de la fenêtre d'analyse (nb de pixels) pour laquelle on juge qu'un nouveau feu débute
 new_fire_window_size = 7 
 
-# SCR des images MODIS de réflectance (point de départ si une transofrmation est nécessaire)
+# Seuil de distance pour laquelle on juge qu'une localité doit être évacuée
+warning_treshold = 20000 # m (ou 20 km)
+
+# SCR des images MODIS de réflectance (point de départ si une transformation est nécessaire)
 starting_crs = "EPSG:4269" # NAD83
 
 # SCR de prédilection lorsqu'une transformation de coordonnées degrés à métriques est nécessaire 
@@ -504,11 +502,149 @@ def find_difference_centroids_and_distances(polygons_list):
         current_distance = distance(polygons_centroid[i], polygons_difference_centroid[i+1])
         centroid_distances.append(current_distance)
         
-
     return polygons_centroid, polygons_difference_centroid,  centroid_distances
+
+
+# Fonction permettant de générer un graphique d'évolution de la position du feu (centroides)
+def generate_fire_evolution_plot(burnt_polygons_centroid, burnt_polygons_difference_centroid, fire_origin_index, fire_origin_date, dates_list):
+    
+    # Changement de système de coordonnées pour être en latitude et longitude
+    burnt_polygons_centroid = change_of_crs(burnt_polygons_centroid, final_crs, starting_crs)
+    burnt_polygons_difference_centroid = change_of_crs(burnt_polygons_difference_centroid, final_crs, starting_crs)
+    
+    # Initialisation des listes qui contiendront les points (x,y) de l'évolution des positions extremes du feu
+    list_of_x = [burnt_polygons_centroid[fire_origin_index].x]
+    list_of_y = [burnt_polygons_centroid[fire_origin_index].y]
+
+    # Initialisation de la liste qui contiendra les dates de chacun des points du graphique
+    list_of_dates = [fire_origin_date]
+
+    # Boucle sur les indices des listes de polygones brulés
+    for i in range (len(burnt_polygons_difference_centroid)):
+    
+    # On associe l'element a une variable point
+        point = burnt_polygons_difference_centroid[i]
+    
+    # Si aucune géométrie de point (date antérieure au début du feu)
+        if point == None:
+            continue # On passe à  la prochaine itération
+    
+    # Si le point est vide (pas de variation entre 2 centroides successifs)
+        if point.is_empty == True:
+            continue # On passe a la prochaine iteration
+    
+    # Si le point est non-nul, on ajoute les coordonnées aux listes respectives
+        x_coord = point.x
+        y_coord = point.y
+    
+        list_of_x.append(x_coord)
+        list_of_y.append(y_coord)
+        list_of_dates.append(dates_list[i])
+
+    # Création, personnalisation et sauvegarde du graphique
+    plt.plot(list_of_x, list_of_y, linestyle='--', marker='o', markersize=3, color = 'red')
+    
+    # Plot des points temporel final et d origine
+    plt.plot(list_of_x[0], list_of_y[0], marker='*',  markersize = 10, color = 'black')
+    plt.plot(list_of_x[-1], list_of_y[-1], marker='X',  markersize = 10, color = 'black')
+    
+    # Annotation de chaque point avec la date adequate
+    for i, date in enumerate(list_of_dates):
+        plt.annotate(date, (list_of_x[i], list_of_y[i]), textcoords = "offset points", xytext = (0, 10), ha = 'left', fontsize = 7, fontweight='bold')
+    
+    # Autres parametres du graphique pour l'affichage
+    plt.xlim(min(list_of_x)-0.05, max(list_of_x)+0.05)
+    plt.ylim(min(list_of_y)-0.025, max(list_of_y)+0.025)
+    plt.xlabel('Longitude (deg)')
+    plt.ylabel('Latitude (deg)')
+    plt.grid()
+    
+    # Sauvegarde du graphique
+    plt.savefig('fire_temporal_evolution.png')
+    plt.close()
+    
+
+# Fonction calculant la direction générale d'un vecteur reliant 2 points de géométrie shapely
+def general_vector_direction(point1, point2):
+    
+    # On enregistre les valeurs de coordonnées x et y
+    x1, y1 = point1.x, point1.y
+    x2, y2 = point2.x, point2.y
+    
+    # On calcule les cotés du triangle rectangle
+    delta_x, delta_y = x2-x1, y2-y1
+    
+    # On calcule l'angle avec la fonction trigonométrique arctangente
+    angle = np.arctan2(delta_y, delta_x) # Angle en radians
+    
+    # Selon la valeur et le quadrant, on attribue la bonne direction générale
+    if angle > np.pi/2:
+        direction = "Nord-Ouest"
+    elif angle > 0:
+        direction = "Nord-Est"
+    elif angle > -np.pi/2:
+        direction = "Sud-Est"
+    else:
+        direction = "Sud-Ouest"
         
-# une fonction pour générer une image des zones brûlées
-def generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs, filename, date_of_report):
+    return direction
+
+
+# Fonction qui calcule les distances séparant le polygone de feu aux lieux habités voisins et qui retourne des infos sur la localité la plus proche 
+# et les localités situées sous un seuil de danger
+def find_closest_inhabited_places(analysis_layers_directory, fire_polygon, crs_of_shp, warning_treshold):
+    
+    # Lecture de la couche de points des lieux habités dans un geodataframe
+    geodataframe = gpd.read_file(f"zip://{analysis_layers_directory}/Lieux_habit_QC.zip")
+
+    # Création d'un array contenant les différentes géométries de la couche
+    geometry_array = geodataframe.geometry.array
+    
+    # Conversion dans le meme systeme metrique que les polygones de feu
+    geometry_array = change_of_crs(geometry_array, crs_of_shp, final_crs)
+
+    # Array contenant le type de lieu habité
+    area_type_array = geodataframe['typentitto'].to_numpy()
+
+    # Array contenant le nom du lieu habité
+    area_name_array = geodataframe['nomcartrou'].to_numpy()
+    
+    # Arrays contenant les latitudes et longitudes des lieux habités
+    longitude_array = geodataframe['longitude'].to_numpy()
+    latitude_array = geodataframe['latitude'].to_numpy()
+    
+    # Initialisation de la plus petite distance entre le feu et une ville
+    smallest_distance = 500000
+    
+    # Initialisation d<une liste qui contiendra des chaines de caracteres sur les localités en danger
+    danger_info_string_list = []
+    
+    # Boucle sur les geometries du shapefile
+    for i in range(len(geometry_array)):
+        
+        # Geometrie de point du lieu habite
+        point = geometry_array[i]
+        
+        # Calcul de la distance minimale entre les points et le polygone de feu
+        current_distance = distance(point, fire_polygon)
+        
+        # On verifie si on a un nouveau minimum et si le point designe une Ville
+        if current_distance < smallest_distance and area_type_array[i] == 'Ville':
+            smallest_distance = current_distance # On met à jour la plus petite distance
+            closest_city = area_name_array[i] # La ville la plus près est sauvegardée
+            
+        # On verifie si le point est en danger, et on sauvegarde les infos pertinentes
+        if current_distance < warning_treshold:
+            danger_info_string = f'{area_type_array[i]} de {area_name_array[i]} ({longitude_array[i]}, {latitude_array[i]}) est à {round(current_distance,2)/1000} km du feu.'
+            danger_info_string_list.append(danger_info_string)
+            
+            print(danger_info_string)
+    
+    return closest_city, danger_info_string_list
+    
+            
+# Fonction permettant de générer une image des zones brûlées
+def generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs):
     # Créer un polygone de l'étendue de la zone du feu
     transformer = pyproj.Transformer.from_crs(starting_crs, final_crs, always_xy = True).transform
     # initialiser les bounds
@@ -556,8 +692,9 @@ def generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, star
     #Agrandir l'étendue de l'image pour que le texte ne soit pas coupé
     plt.subplots_adjust(bottom=0.3, left = 0.001) 
     # sauvegarder et fermer le graphique
-    plt.savefig(filename)
+    plt.savefig('fire_zones.png')
     plt.close()    
+
 
 # Fonction permettant de créer une carte GeoTIFF pour les indices spectraux calculés (NDVI et NBR)
 def create_geotiff_map(NDVI, NBR, dNBR, dNDVI, date_of_report, metadata_refl):
@@ -593,10 +730,11 @@ def create_geotiff_map(NDVI, NBR, dNBR, dNDVI, date_of_report, metadata_refl):
     with rasterio.open('dNBR_' + str(date_of_report) + '.tif', 'w', **profile) as dst:
         dst.write(dNBR, 1) 
 
- # Fonction qui génère un rapport docx
+
+# Fonction qui génère un rapport docx selon des variables définies
 def generate_report(date_of_report,word_template_directory, fire_general_speed_kmh, message, burnt_area_total, burnt_area):
         # on lit le modèle avec les balises
-        doc = DocxTemplate(word_template_directory + r'/template_word_proj.docx')
+        doc = DocxTemplate(word_template_directory + 'template_word_proj.docx')
         # on envoie les infos
         context = {
             'date': date_of_report, 'region': 'région', 'dir_fire': 'direction feu',
@@ -605,7 +743,7 @@ def generate_report(date_of_report,word_template_directory, fire_general_speed_k
             'burnt_area_total' : burnt_area_total, 'graph_pos' : 'TODO',
         }
         # on ajoute l'image des polygones de feux
-        context['fire_image'] = InlineImage(doc, 'feux.png', width=Mm(100))
+        context['fire_image'] = InlineImage(doc, 'fire_zones.png', width=Mm(100))
         # on ajoute le graphique qui montre l'évolution de la localisation du feu
         #context['graph_pos'] = InlineImage(doc, graph_pos, width=Mm(100)) #TODO 
         # on ajoute l'image du NDVI
@@ -622,6 +760,7 @@ def generate_report(date_of_report,word_template_directory, fire_general_speed_k
         doc.render(context)
         # on génère le fichier pour une donnée
         doc.save('report_' + str(date_of_report) + '.docx')
+
 
 ############################################################################
 # EXÉCUTIONS PRINCIPALES DU SCRIPT
@@ -746,6 +885,10 @@ burnt_polygons = MultiPolygon(fire_origin_polygon)
 
 # On fait une boucle sur toutes les dates suivant la première apparition d'un feu
 for i in np.arange(fire_origin_index, len(NBR_list) - 1):
+    
+    # Message de suivi dans la console
+    print(f"\nAnalyse de l'image du {dates_list_for_search[i + 1]} en cours ...")
+    
     dNBR_grid = NBR_list[0] - NBR_list[i+1] # Calcul de la grille dNBR entre la première date et la date étudiée
     dNDVI_grid = NDVI_list[i+1] - NDVI_list[0] # Calcul de la grille dNDVI entre la première date et la date étudiée
     
@@ -785,7 +928,9 @@ for i in np.arange(fire_origin_index, len(NBR_list) - 1):
 
     # On ajoute les polygones finaux à la liste temporelle de géométries
     burnt_polygons_list.append(burnt_polygons)
-    
+
+print('\nTOUTES LES IMAGES ONT ÉTÉ ANALYSÉES AVEC SUCCÈS!')
+print('================================================')
 
 ############################################################################
 # PARTIE 5: CALCULS ET ANALYSES SUR LES ZONES BRÛLÉES
@@ -798,32 +943,29 @@ for i in np.arange(fire_origin_index, len(NBR_list) - 1):
 # On transforme les points dans une projection métrique adaptée à la zone d'intérêt
 transformed_burnt_polygons_list = change_of_crs(burnt_polygons_list, starting_crs, final_crs)
 
+# Calcul des centroides de l'ensemble des polygones brulés pour chaque date, des centroides des nouvelles zones brulées pour l'itération en cours, et de la distance entre ces 2 ensembles
+burnt_polygons_centroid, burnt_polygons_difference_centroid, centroid_distances = find_difference_centroids_and_distances(transformed_burnt_polygons_list)
+
+# Calcul de la vitesse générale du feu 
+fire_general_speed_ms = np.array(centroid_distances)/86400   # en m/s
+fire_general_speed_kmh = fire_general_speed_ms*3600/1000     # en km/h
+
+# Création du graphique d'évolution de la position globale du feu
+generate_fire_evolution_plot(burnt_polygons_centroid, burnt_polygons_difference_centroid, fire_origin_index, fire_origin_date, dates_list_for_search)
+
+# On calcule la direction générale du feu à la dernière itération
+direction = general_vector_direction(burnt_polygons_centroid[-1], burnt_polygons_difference_centroid[-1])
+
+print(direction)
+    
 # calcul de la superficie des nouvelles zones brûlées
 burnt_area_today = transformed_burnt_polygons_list[-1].area - transformed_burnt_polygons_list[-2].area #superficie brûlée dans la journée du rapport
 burnt_area_today = round(burnt_area_today / 1000000, 2) # conversion en km^2
 total_burnt_area = transformed_burnt_polygons_list[-1].area # superficie totale brûlée depuis le début du feu
 total_burnt_area = round(total_burnt_area / 1000000, 2) # conversion en km^2
 
-# Calcul des centroides des polygones brulés pour chaque date
-burnt_polygons_centroid, burnt_polygons_difference_centroid, centroid_distances = find_difference_centroids_and_distances(transformed_burnt_polygons_list)
-
-print(burnt_polygons_centroid)
-print(centroid_distances)
-
-# Calcul de la vitesse générale du feu 
-fire_general_speed_ms = np.array(centroid_distances)/86400   # en m/s
-fire_general_speed_kmh = fire_general_speed_ms*3600/1000     # en km/h
-
-# TODO Rendre plus clair la fonction find_difference_centroids_and_distances()
-
-# TODO Créer le graphique d'évolution de la position globale du feu
-# Essai pour le graphique
-#for point in burnt_polygons_difference_centroids
-#list_of_x = 
-
-#TODO Loader les couches SHP des lieux habités et du réseau routier (pour la route, choisir la bonne couche dans le ZIP)
-
-#TODO Choisir un seuil sous lequel on avertis que les lieux habités sont en danger (mettre dans les variables globales du code)
+# On sauvegarde la ville la plus proche ainsi que les infos des localités à risque!
+find_closest_inhabited_places(analysis_layers_directory, transformed_burnt_polygons_list[-1], shp_layer_crs, warning_treshold)
 
 
 ############################################################################
@@ -841,18 +983,10 @@ message = "Attention le feu est à moins de x km. Se préparer à évacuer." #me
 # Chemin d'une image source pour les métadonnées
 source_image_path = f'{refl_images_folder}MODIS_B1_B2_B7_AOI_{date}.tif' 
 #générer une image des polygones des zones brûlées géoréférencées
-generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs, 'feux.png', str(date_of_report))
+generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs)
 # générer les images Geotiff des indices NDVI et NBR
 # génération des images du NDVI et NBR
 create_geotiff_map(NDVI, NBR, dNBR_grid, dNDVI_grid, date_of_report, metadata_refl)
     
 # générer un rapport word de l'état du feu
-generate_report(date_of_report,word_template_directory, fire_general_speed_kmh, message, total_burnt_area, burnt_area_today)
-
-
-
-
-
-
-
-
+generate_report(date_of_report, word_template_directory, fire_general_speed_kmh, message, total_burnt_area, burnt_area_today)
