@@ -1,7 +1,7 @@
 '''
 ------------------------------------------------------------------------
 Mini-projet du cours GMQ710 (Automne 2025)
-Suivi quotidien de l'évolution (vitesse et position globale) d'incendies de forêt 
+Suivi quotidien de l'évolution (vitesse, position globale, surface touchée, etc.) d'incendies de forêt 
 ------------------------------------------------------------------------
 Écrit par: Charles Raymond & Daphné Normandeau
 ------------------------------------------------------------------------
@@ -23,11 +23,10 @@ from shapely.geometry import Point, MultiPoint, LineString, Polygon, MultiPolygo
 from shapely import convex_hull, buffer, intersects, union, union_all, centroid, distance, difference
 from shapely.ops import transform
 import pyproj
-
 from scipy.ndimage import label
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
-#import docx2pdf
+import docx2pdf
 import cartopy.crs as ccrs
 import shapely.wkt
 import contextily as cx
@@ -39,25 +38,25 @@ import contextily as cx
 
 #Chemin du dossier avec les images MODIS, réso. spatiale de 500 m (bandes b01 = R, b02 = NIR et b07 = SWIR)
 # Les images proviennent du jeu de données Google Eart Engine "MODIS/006/MOD09GA"
-refl_images_folder = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+refl_images_folder = 'Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Chemin du dossier avec les images  MODIS, réso. spatiale de 1 km (bande de LST)
 # Les images proviennent du jeu de données Google Eart Engine "MODIS/061/MOD21A1D"
-lst_images_folder = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Chemin du dossier contenant les couches SHP contenant les lieux habités de la province 
 # de QC (géométrie de points, provenant du site de Données Québec)
-analysis_layers_directory = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/GMQ710_projet_Charles_Daphne/Downloaded_layers/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+analysis_layers_directory = 'Couches/Downloaded_layers/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 shp_layer_crs = "EPSG:4326" #WGS84
+
+#Chemin pour le template du rapport word
+word_template_directory = 'C:/Users/charl/OneDrive/Bureau/Université Sherbrooke/Automne 2025/GMQ710 - Analyse et programmation en géomatique/PYTHONCODES/Mini-projet/'  #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Seuil de pixels pour lequel on considère la LST comme étant suffisamment représentative de la zone étudiée
 correct_LST_treshold = 20 # % # (À MODIFIER AU BESOIN)
 
 # Date d'émission du rapport (fin de la période d'analyse)
-date_of_report = '2023-06-03' # (À MODIFIER AU BESOIN)
-
-#Chemin pour le template du rapport word
-word_template_directory = 'C:/Users/daphn/Documents/Codes_python/.conda/GMQ710_projet/GMQ710_projet_Charles_Daphne/'  #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
+date_of_report = '2023-06-06' # (À MODIFIER AU BESOIN)
 
 # Date de la première image (début de la période d'analyse)
 start_date = '2023-05-27'
@@ -773,6 +772,7 @@ def create_geotiff_map(NDVI, NBR, dNBR, dNDVI, date_of_report, metadata_refl):
     plt.colorbar(fraction=0.025)
     plt.savefig('dNBR_' + str(date_of_report))
     plt.close() 
+    
 
 # Fonction qui génère un rapport docx selon des variables définies
 def generate_report(word_template_directory, start_fire_date, date, city, dir_fire, fire_speed, warning_message, burnt_area, burnt_area_total, first_image_date, LST_treshold):
@@ -1043,7 +1043,7 @@ LST_treshold = correct_LST_treshold     # Seuil de pixels pour lesquel la LST es
 generate_report(word_template_directory, start_fire_date, date, city, dir_fire, fire_speed, warning_message, burnt_area, burnt_area_total, first_image_date, LST_treshold)
 
 # Conversion du rapport généré en format PDF pour un rendu plus professionnel
-#docx2pdf.convert(f"report_{date}.docx", f"report_{date}.pdf")
+docx2pdf.convert(f"report_{date}.docx", f"report_{date}.pdf")
 
 # Impression d'un message de fin
 print("\nRapport généré avec succès!\nFin de l'exécution du programme ...")
