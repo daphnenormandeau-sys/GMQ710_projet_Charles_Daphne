@@ -10,7 +10,6 @@ Suivi quotidien de l'évolution (vitesse et position globale) d'incendies de for
 # Importations de librairies pertinentes
 import sys
 import numpy as np
-import math as m
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
@@ -25,6 +24,7 @@ from matplotlib import cycler
 from scipy.ndimage import label
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
+import docx2pdf
 import cartopy.crs as ccrs
 import shapely.wkt
 import contextily as cx
@@ -47,8 +47,11 @@ lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE D
 analysis_layers_directory = 'Couches/Downloaded_layers/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 shp_layer_crs = "EPSG:4326" #WGS84
 
+# Seuil de pixels pour lequel on considère la LST comme étant suffisammetn représentative de la zone étudiée
+correct_LST_treshold = 20 # % # (À MODIFIER AU BESOIN)
+
 # Date d'émission du rapport (fin de la période d'analyse)
-date_of_report = '2023-06-03' # (À MODIFIER AU BESOIN)
+date_of_report = '2023-06-06' # (À MODIFIER AU BESOIN)
 
 #Chemin pour le template du rapport word
 word_template_directory = 'C:/Users/charl/OneDrive/Bureau/Université Sherbrooke/Automne 2025/GMQ710 - Analyse et programmation en géomatique/PYTHONCODES/Mini-projet/'  #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
@@ -616,8 +619,8 @@ def find_closest_inhabited_places(analysis_layers_directory, fire_polygon, crs_o
     # Initialisation de la plus petite distance entre le feu et une ville
     smallest_distance = 500000
     
-    # Initialisation d<une liste qui contiendra des chaines de caracteres sur les localités en danger
-    danger_info_string_list = []
+    # Initialisation d'une chaîne de caractères sur les localités en danger
+    danger_info_string = ''
     
     # Boucle sur les geometries du shapefile
     for i in range(len(geometry_array)):
@@ -635,12 +638,14 @@ def find_closest_inhabited_places(analysis_layers_directory, fire_polygon, crs_o
             
         # On verifie si le point est en danger, et on sauvegarde les infos pertinentes
         if current_distance < warning_treshold:
-            danger_info_string = f'{area_type_array[i]} de {area_name_array[i]} ({longitude_array[i]}, {latitude_array[i]}) est à {round(current_distance,2)/1000} km du feu.'
-            danger_info_string_list.append(danger_info_string)
-            
-            print(danger_info_string)
+            current_string = f'{area_type_array[i]} de {area_name_array[i]} ({round(longitude_array[i],2)}, {round(latitude_array[i],2)}) est à {round(current_distance/1000,2)} km du feu. !! SVP VEUILLEZ ÉVACUER !!\n\n'
+            danger_info_string += current_string # On ajoute le string aux infos
     
-    return closest_city, danger_info_string_list
+    # Si aucune localité est sous le seuil d'avertissement, on enregistre un message que tout est ok       
+    if len(danger_info_string) == 0:
+        danger_info_string = "Il n'y a présentement aucun lieu habité se trouvant en danger imminent. Restez cependant à l'affût de l'évolution du feu dans les jours à suivre!"
+    
+    return closest_city, danger_info_string
     
             
 # Fonction permettant de générer une image des zones brûlées
@@ -732,34 +737,38 @@ def create_geotiff_map(NDVI, NBR, dNBR, dNDVI, date_of_report, metadata_refl):
 
 
 # Fonction qui génère un rapport docx selon des variables définies
-def generate_report(date_of_report,word_template_directory, fire_general_speed_kmh, message, burnt_area_total, burnt_area):
+def generate_report(word_template_directory, start_fire_date, date, city, dir_fire, fire_speed, warning_message, burnt_area, burnt_area_total, first_image_date, LST_treshold):
         # on lit le modèle avec les balises
         doc = DocxTemplate(word_template_directory + 'template_word_proj.docx')
         # on envoie les infos
         context = {
-            'date': date_of_report, 'region': 'région', 'dir_fire': 'direction feu',
-            'fire_speed': round(fire_general_speed_kmh[-1],2),
-            'warning_message' : message, 'close_cities' : 'villes_proches', 'burnt_area' : burnt_area,
-            'burnt_area_total' : burnt_area_total, 'graph_pos' : 'TODO',
+            'start_fire_date': start_fire_date, 'date': date, 'city': city, 
+            'dir_fire': dir_fire, 'fire_speed': round(fire_speed,2),
+            'warning_message' : warning_message, 'burnt_area' : burnt_area,
+            'burnt_area_total' : burnt_area_total, 'first_image_date' : first_image_date,
+            'LST_treshold': LST_treshold
         }
+        
         # on ajoute l'image des polygones de feux
-        context['fire_image'] = InlineImage(doc, 'fire_zones.png', width=Mm(100))
+        context['fire_zones_image'] = InlineImage(doc, 'fire_zones.png', width=Mm(80))
         # on ajoute le graphique qui montre l'évolution de la localisation du feu
-        #context['graph_pos'] = InlineImage(doc, graph_pos, width=Mm(100)) #TODO 
+        context['fire_evolution_image'] = InlineImage(doc, 'fire_temporal_evolution.png', width=Mm(80))
         # on ajoute l'image du NDVI
-        context['NDVI_ajd'] = InlineImage(doc, 'NDVI_' + str(date_of_report) + '.tif', width=Mm(100))  
+        context['NDVI_today'] = InlineImage(doc, 'NDVI_' + str(date) + '.tif', width=Mm(80))  
         # on ajoute l'image du dNDVI
-        context['dNDVI'] = InlineImage(doc, 'dNDVI_' + str(date_of_report) + '.tif', width=Mm(100)) 
+        context['dNDVI'] = InlineImage(doc, 'dNDVI_' + str(date) + '.tif', width=Mm(80)) 
         # on ajoute l'image du NBR
-        context['NBR_ajd'] = InlineImage(doc, 'NBR_' + str(date_of_report) + '.tif', width=Mm(100)) 
+        context['NBR_today'] = InlineImage(doc, 'NBR_' + str(date) + '.tif', width=Mm(80)) 
         # on ajoute l'image du dNBR
-        context['dNBR'] = InlineImage(doc, 'dNBR_' + str(date_of_report) + '.tif', width=Mm(100))  
-        # on ajoute le graphique d'évolutiond des indices
-        context['graph_indices'] = InlineImage(doc,'All_indices.png', width=Mm(100))  
+        context['dNBR'] = InlineImage(doc, 'dNBR_' + str(date) + '.tif', width=Mm(80))  
+        # on ajoute le graphique d'évolution des moyennes des indices
+        context['graph_mean_indices'] = InlineImage(doc,'All_indices.png', width=Mm(80))
+        # on ajoute le graphique d'évolution de la moyenne de température
+        context['graph_mean_LST'] = InlineImage(doc,'LST_Mean.png', width=Mm(80))
 
         doc.render(context)
         # on génère le fichier pour une donnée
-        doc.save('report_' + str(date_of_report) + '.docx')
+        doc.save('report_' + str(date) + '.docx')
 
 
 ############################################################################
@@ -828,7 +837,7 @@ LST_mean_values, _, _ = extract_data_stats(LST_list)
 
 # Puisque la LST moyenne n'est pas toujours représentative de la région (LST du produit MODIS non corrigée pour la couverture nuageuse),
 # il faut choisir les journées où la LST moyenne est pertinente (+ de 20% des pixels ont une valeur valide)
-corrected_LST_mean_values = correct_LST_stat_values(LST_list, LST_mean_values, 20)
+corrected_LST_mean_values = correct_LST_stat_values(LST_list, LST_mean_values, correct_LST_treshold)
 
 # Stockage des valeurs moyennes dans un DataFrame pandas
 mean_df = generate_stats_dataframe('Mean', NDVI_mean_values, NBR_mean_values, corrected_LST_mean_values, dates_list)
@@ -954,10 +963,8 @@ fire_general_speed_kmh = fire_general_speed_ms*3600/1000     # en km/h
 generate_fire_evolution_plot(burnt_polygons_centroid, burnt_polygons_difference_centroid, fire_origin_index, fire_origin_date, dates_list_for_search)
 
 # On calcule la direction générale du feu à la dernière itération
-direction = general_vector_direction(burnt_polygons_centroid[-1], burnt_polygons_difference_centroid[-1])
+fire_direction = general_vector_direction(burnt_polygons_centroid[-1], burnt_polygons_difference_centroid[-1])
 
-print(direction)
-    
 # calcul de la superficie des nouvelles zones brûlées
 burnt_area_today = transformed_burnt_polygons_list[-1].area - transformed_burnt_polygons_list[-2].area #superficie brûlée dans la journée du rapport
 burnt_area_today = round(burnt_area_today / 1000000, 2) # conversion en km^2
@@ -965,28 +972,40 @@ total_burnt_area = transformed_burnt_polygons_list[-1].area # superficie totale 
 total_burnt_area = round(total_burnt_area / 1000000, 2) # conversion en km^2
 
 # On sauvegarde la ville la plus proche ainsi que les infos des localités à risque!
-find_closest_inhabited_places(analysis_layers_directory, transformed_burnt_polygons_list[-1], shp_layer_crs, warning_treshold)
+closest_city, danger_info_string = find_closest_inhabited_places(analysis_layers_directory, transformed_burnt_polygons_list[-1], shp_layer_crs, warning_treshold)
+
+# On génère une image des polygones des zones brûlées géoréférencées
+# Cette image sera appelée directement dans la fonction qui remplit le template
+generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs)
+
+# On génère des images GeoTIFF des indices NDVI et NBR pour la date en cours, + les dNDVI et dNBR entre la première et dernière date
+# Ces images seront appelée directement dans la fonction qui remplit le template
+create_geotiff_map(NDVI, NBR, dNBR_grid, dNDVI_grid, date_of_report, metadata_refl)
 
 
 ############################################################################
 # PARTIE 6: GÉNÉRATION DU RAPPORT QUOTIDIEN POUR LA DATE 'date_of_report'
 ############################################################################
+# Dans cette section, des variables sont définies et sont insérées dans leurs balises respectives du template word 
+# 'template_word_proj.docx' dont le chemin est spécifié dans les variables globales en début de script
 
-#TODO Assigner une valeur aux variables pertinentes qu'on insérera dans le template docx
-#region = ? variable pour la région du feu (pour nos données c'est Lebel-sur-Quévillon)
-#dir_feu = ? direction générale du feu (NSEO)
-# message d'avertissement 
-message = "Attention le feu est à moins de x km. Se préparer à évacuer." #message d'Avertissement si il y a des villes prochent du feu qui devraient bientôt évacuer
-#city_in_danger = ? liste des villes proches des feux
+# Ces nouvelles définitions ne font que rassembler au même endroit toutes les balises du template à remplir
+start_fire_date = fire_origin_date      # Date à laquelle le feu a officiellement commencé
+date = date_of_report                   # Date à laquelle le rapport est émis
+city = closest_city                     # Ville la plus rapprochée du feu de forêt
+dir_fire = fire_direction               # Direction générale du feu
+fire_speed = fire_general_speed_kmh[-1] # Vitesse du feu à la dernière itération
+warning_message = danger_info_string    # Message d'avertissement en cas de danger
+first_image_date = start_date           # Date de la première image étudiée (pré-feu, ayant servi aux calculs)
+burnt_area = burnt_area_today           # Superficie brûlée dans les dernières 24 heures
+burnt_area_total = total_burnt_area     # Superficie totale brûlée depuis le début du feu
+LST_treshold = correct_LST_treshold     # Seuil de pixels ()
 
-# Création des images contenue dans le rapport word
-# Chemin d'une image source pour les métadonnées
-source_image_path = f'{refl_images_folder}MODIS_B1_B2_B7_AOI_{date}.tif' 
-#générer une image des polygones des zones brûlées géoréférencées
-generateImage_firezones(transformed_burnt_polygons_list, metadata_refl, starting_crs, final_crs)
-# générer les images Geotiff des indices NDVI et NBR
-# génération des images du NDVI et NBR
-create_geotiff_map(NDVI, NBR, dNBR_grid, dNDVI_grid, date_of_report, metadata_refl)
-    
-# générer un rapport word de l'état du feu
-generate_report(date_of_report, word_template_directory, fire_general_speed_kmh, message, total_burnt_area, burnt_area_today)
+# Génération du rapport quotidien sous format docx présentant l'état du feu
+generate_report(word_template_directory, start_fire_date, date, city, dir_fire, fire_speed, warning_message, burnt_area, burnt_area_total, first_image_date, LST_treshold)
+
+# Conversion du rapport généré en format PDF pour un rendu plus professionnel
+docx2pdf.convert(f"report_{date}.docx", f"report_{date}.pdf")
+
+# Impression d'un message de fin
+print("\nRapport généré avec succès!\nFin de l'exécution du programme ...")
