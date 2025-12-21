@@ -18,22 +18,25 @@ Afin de produire un programme permettant de produire un rapport PDF énonçant l
 4)	Graphiques d’évolution temporelles des indices (NDVI/NBR) et de la température (à partir d’un dataframe ‘pandas’)
 5)	Classification des zones brûlées (à partir du dNBR à chaque itération pour un suivi des zones touchées)
 6)	Suivi temporel des zones touchées (fenêtre d'analyse à chaque itération, polygonisation itérative de la zone brûlée)
-7)	Détermination de la direction générale du feu entre 2 itérations/images à partir des poygones (distance de Hausdorff ?)
-8)	Création d’une couche de géométrie point pour la limite du feu dans la direction de propagation, qui sera mise à jour à chaque image
+7)	Détermination de la direction générale du feu entre 2 itérations/images à partir des poygones (distances entre centroides)
+8)	Création d’un graphique de points pour la limite du feu dans la direction de propagation, qui sera mise à jour à chaque image
 9)	Calcul de la vitesse de déplacement du feu entre chaque itération
 10)	Création et mise à jour d’un graphique de propagation du feu 
 11)	Établir des règles concernant les distances au feu nécessitant une évacuation en utilisant geopandas et en calculant les distances séparant le feu des municipalités avoisinantes.
-12)	Création du rapport automatisé avec la librairie appropriée 
+12)	Création du rapport automatisé avec la librairie appropriée (docxtpl et docx2pdf)
 
 Préalablement à ces étapes, des images satellites de MODIS d'un feu de forêt documenté seront récupérées et seront les images de référence pour construire le scripte du programme. Le feu ayant eu lieu a Lebel-sur-Quévillon en 2023 (# 344 de 2023 de la SOPFEU) a été choisi pour ce faire.
 
 ## Outils et langages prévus :
 -	Langage(s) : Python
--	Bibliothèques ou logiciels : rasterio, numpy, matplotlib, pandas, geopandas, docxtpl
+-	Bibliothèques ou logiciels : rasterio, numpy, shapely,  matplotlib, pandas, geopandas, docxtpl, docx2pdf
 
 ## Répartition des tâches dans l’équipe
 - Daphné Normandeau : Écriture de la logique du code, production de graphiques, rédaction de la documentation
 - Charles Raymond : Recherche de données, généralisation et révision du code, peaufinage des graphiques et de la présentation
+
+## Pour rouler le script Python:
+Afin de rouler adéqautement le script Python, il est essentiel de télécharger la dernière version à jour du code (soit Mini_projet_CR_DN_v11.py) et les données du Google Drive présent dans le lien plus haut. Une fois les données (rasters et couches) décompressées, il faudra ajuster le chemin des différentes couches dans les variables globales du code. La date pour laquelle on souhaite générer le rapport PDF est régie par la variable globale 'date_of_report'. Il est possible que vous devrez installer des librairies en entête du code si votre environnement Python personnel ne les possède pas encore. ATTENTION: Dû à des limitations du code dans l'algorithme de polygonisation des zones brûlées, il est futile d'émettre un rapport pour des dates trop avancées (10 juin et plus). En effet, les variations entre les images seront minimes, puisque l'algorithme considérera la zone entière comme étant brûlée...
 
 
 
