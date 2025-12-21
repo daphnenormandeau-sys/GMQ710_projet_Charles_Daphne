@@ -924,6 +924,11 @@ for i in range(len(NBR_list) - 1):
     else:
         burnt_polygons_list.append(None)
 
+# Si le dernier polygone en liste (dernière date) est vide, alors aucun feu n'a débuté encore et on imprime un message
+if burnt_polygons_list[-1] == None:
+    print("\nOups, il semble qu'aucun feu n'ait été détecté selon les critères demandés (seuil et date du rapport)!")
+    sys.exit() # Le programme est arrêté
+
 # Une fois le polygone du tout début du feu trouvé, on cartographie les zones brûlées pour toutes les dates suivantes
 
 # On initialise les zones brûlées avec le polygone d'origine du feu. On le transforme tout de suite en objet MultiPolygon pour pouvoir
