@@ -37,11 +37,11 @@ import contextily as cx
 ############################################################################
 
 #Chemin du dossier avec les images MODIS, réso. spatiale de 500 m (bandes b01 = R, b02 = NIR et b07 = SWIR)
-# Les images proviennent du jeu de données Google Eart Engine "MODIS/006/MOD09GA"
+# Les images proviennent du jeu de données Google Earth Engine "MODIS/006/MOD09GA"
 refl_images_folder = 'Rasters/SUR_REFL_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Chemin du dossier avec les images  MODIS, réso. spatiale de 1 km (bande de LST)
-# Les images proviennent du jeu de données Google Eart Engine "MODIS/061/MOD21A1D"
+# Les images proviennent du jeu de données Google Earth Engine "MODIS/061/MOD21A1D"
 lst_images_folder = 'Rasters/LST_rasters/' #(À MODIFIER SELON LA STRUCTURE DE DOSSIERS)
 
 # Chemin du dossier contenant les couches SHP contenant les lieux habités de la province 
